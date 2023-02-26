@@ -1,0 +1,14 @@
+[package]
+name = "viplot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.69"
+argh = "0.1.10"
+image = { version = "0.24.5", default-features = false, features = ["png"] }
+imageproc = { version = "0.23.0", default-features = false }
+num-integer = "0.1.45"
+palette = "0.6.1"
+rusttype = "0.9.3"
+unicode-segmentation = "1.10.1"
