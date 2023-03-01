@@ -51,17 +51,49 @@ struct Opts {
     debug_filterted_csv: Option<PathBuf>,
 
     /// explicitly specify column colours, like `column1=red,column2=FF00FF`
-    /// colours may also contain a number of modifier postfix characters like `+`, `-` or `/` to shift hue or desaturate.
+    /// colours may also contain a number of modifier postfix characters:
+    /// `+`, `-` - shift hue
+    /// `/` - desaturate.
+    /// `@` - hue drift
+    /// `_`,`.` - decrease,increase min lightness
+    /// `^`, `~` - decrease, increase max lightness
+    /// `%`, `&` - decrease, increase gradientness
     #[argh(option, short = 'c', default = "Default::default()")]
     colour_overrides: ColourOverrides,
 
     /// use this saturation value for colours not specified explicitly. Defaults to 1.0.
     #[argh(option, short = 'S', default = "1.0")]
     default_saturation: f32,
+    
+    /// defaults to 0.2
+    #[argh(option, short = 'x', default = "0.2")]
+    default_min_lightness: f32,
+
+    /// defaults to 0.75
+    #[argh(option, short = 'X', default = "0.75")]
+    default_max_lightness: f32,
+
+    /// defaults to 0.0
+    #[argh(option, short = 'G', default = "0.0")]
+    default_gradientness: f32,
+
+    /// shift hue toghether with lightness. defaults to 0.0
+    #[argh(option, short = 'D', default = "0.0")]
+    default_hue_drift: f32,
+}
+
+#[derive(Clone, Copy)]
+struct Style {
+    hue: RgbHue,
+    saturation: f32,
+    min_lightness: f32,
+    max_lightness: f32,
+    gradientness: f32,
+    hue_drift: f32,
 }
 
 #[derive(Default)]
-struct ColourOverrides(HashMap<String, (RgbHue, f32)>);
+struct ColourOverrides(HashMap<String, Style>);
 
 impl std::str::FromStr for ColourOverrides {
     type Err = anyhow::Error;
@@ -74,26 +106,26 @@ impl std::str::FromStr for ColourOverrides {
             };
             let mut hue_steps = 0;
             let mut desaturates = 0;
+            let mut min_lightness = 0.2;
+            let mut max_lightness = 0.75;
+            let mut gradientness = 0.0;
+            let mut hue_drift=0.0;
             loop {
-                let mut cont = false;
-                if after_equals.ends_with('+') {
-                    hue_steps += 1;
-                    cont = true;
+                let Some(last_char) = after_equals.as_bytes().last() else { break };
+                match *last_char {
+                    b'+' => hue_steps+=1,
+                    b'-' => hue_steps-=1,
+                    b'/' => desaturates+=1,
+                    b'@' => hue_drift+=10.0,
+                    b'_' => min_lightness-=0.05,
+                    b'.' => min_lightness+=0.05,
+                    b'^' => max_lightness-=0.05,
+                    b'~' => max_lightness+=0.05,
+                    b'%' => gradientness-=0.05,
+                    b'&' => gradientness+=0.05,
+                    _ => break,
                 }
-                if after_equals.ends_with('-') {
-                    hue_steps -= 1;
-                    cont = true;
-                }
-                if after_equals.ends_with('/') {
-                    desaturates += 1;
-                    cont = true;
-                }
-                if cont {
-                    after_equals = &after_equals[0..(after_equals.len() - 1)];
-                    continue;
-                } else {
-                    break;
-                }
+                after_equals = &after_equals[0..(after_equals.len() - 1)];
             }
             let colour = match palette::named::from_str(after_equals) {
                 Some(x) => x,
@@ -108,14 +140,23 @@ impl std::str::FromStr for ColourOverrides {
             let colour = colour.into_format::<f32>();
             let hsl: Hsl = colour.into_color();
             let mut hue = hsl.hue;
-            let mut saturaion = hsl.saturation;
+            let mut saturation = hsl.saturation;
 
             hue += RgbHue::from_degrees(5.0 * hue_steps as f32);
             for _ in 0..desaturates {
-                saturaion *= 0.8;
+                saturation *= 0.8;
             }
 
-            ret.insert(before_equals.to_owned(), (hue, saturaion));
+            let style = Style {
+                hue,
+                saturation,
+                min_lightness,
+                max_lightness,
+                gradientness,
+                hue_drift,
+            };
+
+            ret.insert(before_equals.to_owned(), style);
         }
         Ok(ColourOverrides(ret))
     }
@@ -130,7 +171,7 @@ struct Series {
 
 /// x - datum from 0.0 to 1.0, pix_i - number of pixel in this cell, for gradient
 #[inline]
-fn get_colour(mut x: f64, (mut hue, saturation): (RgbHue, f32), pix_i: u32, pix_n: u32) -> Rgb<u8> {
+fn get_colour(mut x: f64, style: &Style, pix_i: u32, pix_n: u32) -> Rgb<u8> {
     if !x.is_finite() {
         if pix_i % 2 == 0 {
             return Rgb::from([96, 96, 96]);
@@ -139,14 +180,15 @@ fn get_colour(mut x: f64, (mut hue, saturation): (RgbHue, f32), pix_i: u32, pix_
         }
     }
     x = x.clamp(0.0, 1.0);
-    if x > 0.5 {
-        hue += RgbHue::from_degrees(20.0 * x as f32 - 10.0);
-    }
-    let mut lightness = 0.1 + 0.7 * x;
+    let x = x as f32;
+    let mut hue = style.hue;
+    hue += RgbHue::from_degrees(x * style.hue_drift);
+    let mut lightness = style.min_lightness + x * (style.max_lightness - style.min_lightness);
     if pix_n > 1 {
-        lightness += 0.1 - 0.2 * (pix_i as f64) / (pix_n - 1) as f64;
+        let gradient_pos = (pix_i as f32) / (pix_n - 1) as f32;
+        lightness += style.gradientness * (2.0 * gradient_pos - 1.0);
     }
-    let q = palette::Hsl::from_components((hue, saturation, lightness as f32));
+    let q = palette::Hsl::from_components((hue, style.saturation, lightness));
     let q = q.into_color();
     Rgb(palette::Srgb::from_linear(q).into_format().into_raw())
 }
@@ -357,7 +399,7 @@ fn main() -> anyhow::Result<()> {
         hue_step = 55.0
     };
 
-    let main_hues: Vec<(RgbHue, f32)> = dataset
+    let main_hues: Vec<Style> = dataset
         .iter()
         .enumerate()
         .map(|(i, series)| {
@@ -365,7 +407,14 @@ fn main() -> anyhow::Result<()> {
                 *r#override
             } else {
                 let x = hue_step * (i as f32);
-                (RgbHue::from_degrees(x), opts.default_saturation)
+                Style {
+                    hue: RgbHue::from_degrees(x),
+                    saturation: opts.default_saturation,
+                    min_lightness: opts.default_min_lightness,
+                    max_lightness: opts.default_max_lightness,
+                    gradientness: opts.default_gradientness,
+                    hue_drift: opts.default_hue_drift,
+                }
             }
         })
         .collect();
@@ -395,14 +444,14 @@ fn main() -> anyhow::Result<()> {
     let mut cursor_x = MARGIN_LEFT;
 
     for i in 0..n {
-        for ((j, series), hue) in dataset.iter().enumerate().zip(main_hues.iter()) {
+        for ((j, series), style) in dataset.iter().enumerate().zip(main_hues.iter()) {
             let pix_n = block_height * block_height;
             let mut pix_i = 0;
             for v in 0..block_width {
                 for u in 0..block_height {
                     let c = get_colour(
                         series.samples.get(i).copied().unwrap_or(f64::NAN),
-                        *hue,
+                        style,
                         pix_i,
                         pix_n,
                     );
@@ -426,7 +475,7 @@ fn main() -> anyhow::Result<()> {
 /// Returns final cursor_y position
 fn legend(
     dataset: &Vec<Series>,
-    main_hues: &Vec<(RgbHue, f32)>,
+    styles: &Vec<Style>,
     width: u32,
     mut img: Option<&mut ImageBuffer<Rgb<u8>, Vec<u8>>>,
     font: &rusttype::Font,
@@ -434,7 +483,7 @@ fn legend(
     let mut cursor_x = MARGIN_LEFT;
     let mut cursor_y = MARGIN_TOP;
     let mut empty = true;
-    for (series, main_hue) in dataset.iter().zip(main_hues.iter()) {
+    for (series, style) in dataset.iter().zip(styles.iter()) {
         // FIXME: unchecked arithmetic
         let fixed_width = MARGIN_RIGHT + LEDEND_SAMPLE_WIDTH + 2 + 12;
         let text_width = series.name.graphemes(true).count() as u32 * 7;
@@ -446,13 +495,17 @@ fn legend(
         if let Some(img_) = img {
             for i in 0..LEDEND_SAMPLE_WIDTH {
                 let x = i as f64 / (LEDEND_SAMPLE_WIDTH - 1) as f64;
-                let c = get_colour(x, *main_hue, 0, 1);
+                let c = get_colour(x, style, 0, 1);
                 for j in 0..14 {
                     img_.put_pixel(cursor_x + i, cursor_y + j, c);
                 }
             }
 
-            let c = get_colour(0.8, *main_hue, 0, 1);
+            let mut style = style.clone();
+            style.gradientness = 0.0;
+            style.min_lightness = 0.0;
+            style.max_lightness = 1.0;
+            let c = get_colour(0.75, &style, 0, 1);
 
             draw_text_mut(
                 img_,
