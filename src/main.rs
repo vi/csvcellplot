@@ -1,10 +1,10 @@
-use std::{path::PathBuf, collections::HashMap};
+use std::{collections::HashMap, path::PathBuf};
 
 use image::{ImageBuffer, Rgb};
 use imageproc::drawing::draw_text_mut;
 use lerp::Lerp;
 use num_integer::div_ceil;
-use palette::{IntoColor, Pixel, RgbHue, Srgb, GetHue, Hsl};
+use palette::{Hsl, IntoColor, Pixel, RgbHue, Srgb};
 use rusttype::Scale;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -51,12 +51,17 @@ struct Opts {
     debug_filterted_csv: Option<PathBuf>,
 
     /// explicitly specify column colours, like `column1=red,column2=FF00FF`
-    #[argh(option, short='c', default="Default::default()")]
+    /// colours may also contain a number of modifier postfix characters like `+`, `-` or `/` to shift hue or desaturate.
+    #[argh(option, short = 'c', default = "Default::default()")]
     colour_overrides: ColourOverrides,
+
+    /// use this saturation value for colours not specified explicitly. Defaults to 1.0.
+    #[argh(option, short = 'S', default = "1.0")]
+    default_saturation: f32,
 }
 
 #[derive(Default)]
-struct ColourOverrides(HashMap<String, Srgb<u8>>);
+struct ColourOverrides(HashMap<String, (RgbHue, f32)>);
 
 impl std::str::FromStr for ColourOverrides {
     type Err = anyhow::Error;
@@ -64,17 +69,53 @@ impl std::str::FromStr for ColourOverrides {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut ret = HashMap::new();
         for chunk in s.split(',') {
-            let Some((before_equals, after_equals)) = chunk.split_once('=') else {
+            let Some((before_equals, mut after_equals)) = chunk.split_once('=') else {
                 anyhow::bail!("Each colour override chunk should contain `=`")
             };
+            let mut hue_steps = 0;
+            let mut desaturates = 0;
+            loop {
+                let mut cont = false;
+                if after_equals.ends_with('+') {
+                    hue_steps += 1;
+                    cont = true;
+                }
+                if after_equals.ends_with('-') {
+                    hue_steps -= 1;
+                    cont = true;
+                }
+                if after_equals.ends_with('/') {
+                    desaturates += 1;
+                    cont = true;
+                }
+                if cont {
+                    after_equals = &after_equals[0..(after_equals.len() - 1)];
+                    continue;
+                } else {
+                    break;
+                }
+            }
             let colour = match palette::named::from_str(after_equals) {
                 Some(x) => x,
                 _ => match Srgb::from_str(after_equals) {
                     Ok(x) => x,
-                    _ => anyhow::bail!("colour should be name like `red` or hex spec like `#fff` or `004455`")
-                }
+                    _ => anyhow::bail!(
+                        "colour should be name like `red` or hex spec like `#fff` or `004455`"
+                    ),
+                },
             };
-            ret.insert(before_equals.to_owned(), colour);
+
+            let colour = colour.into_format::<f32>();
+            let hsl: Hsl = colour.into_color();
+            let mut hue = hsl.hue;
+            let mut saturaion = hsl.saturation;
+
+            hue += RgbHue::from_degrees(5.0 * hue_steps as f32);
+            for _ in 0..desaturates {
+                saturaion *= 0.8;
+            }
+
+            ret.insert(before_equals.to_owned(), (hue, saturaion));
         }
         Ok(ColourOverrides(ret))
     }
@@ -279,8 +320,8 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    if ! opts.no_hide {
-        dataset.retain(|x|!x.hidden);
+    if !opts.no_hide {
+        dataset.retain(|x| !x.hidden);
     }
 
     if let Some(dbgout) = opts.debug_filterted_csv {
@@ -321,12 +362,10 @@ fn main() -> anyhow::Result<()> {
         .enumerate()
         .map(|(i, series)| {
             if let Some(r#override) = opts.colour_overrides.0.get(&series.name) {
-                let r#override = r#override.into_format::<f32>();
-                let hsl : Hsl = r#override.into_color();
-                (hsl.hue, hsl.saturation)
+                *r#override
             } else {
                 let x = hue_step * (i as f32);
-                (RgbHue::from_degrees(x), 1.0)
+                (RgbHue::from_degrees(x), opts.default_saturation)
             }
         })
         .collect();
