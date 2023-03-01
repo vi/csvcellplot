@@ -42,6 +42,10 @@ struct Opts {
     #[argh(switch, short = 'n')]
     no_fiter: bool,
 
+    /// do not hide trivial series
+    #[argh(switch, short = 'H')]
+    no_hide: bool,
+
     /// output additionla csv with filtered (interpolated) data
     #[argh(option)]
     debug_filterted_csv: Option<PathBuf>,
@@ -51,6 +55,7 @@ struct Series {
     /// from 0 to 1.0.
     samples: Vec<f64>,
     name: String,
+    hidden: bool,
 }
 
 /// x - datum from 0.0 to 1.0, pix_i - number of pixel in this cell, for gradient
@@ -102,6 +107,7 @@ fn main() -> anyhow::Result<()> {
             dataset.push(Series {
                 samples: Vec::with_capacity(4096),
                 name: h.to_owned(),
+                hidden: false,
             })
         }
 
@@ -124,8 +130,8 @@ fn main() -> anyhow::Result<()> {
                     sorted.push(x);
                 }
             }
-            let n = sorted.len();
             let mut dummy = false;
+            let n = sorted.len();
             if n < 2 {
                 dummy = true;
             } else {
@@ -234,6 +240,7 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             if dummy {
+                serie.hidden = true;
                 for x in &mut serie.samples {
                     if x.is_finite() {
                         *x = 0.5;
@@ -242,6 +249,11 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    if ! opts.no_hide {
+        dataset.retain(|x|!x.hidden);
+    }
+
     if let Some(dbgout) = opts.debug_filterted_csv {
         let mut csvout = csv::Writer::from_path(dbgout)?;
         for serie in &dataset {
