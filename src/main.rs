@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, collections::HashMap};
 
 use image::{ImageBuffer, Rgb};
 use imageproc::drawing::draw_text_mut;
 use lerp::Lerp;
 use num_integer::div_ceil;
-use palette::{IntoColor, Pixel, RgbHue};
+use palette::{IntoColor, Pixel, RgbHue, Srgb, GetHue, Hsl};
 use rusttype::Scale;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -49,6 +49,35 @@ struct Opts {
     /// output additionla csv with filtered (interpolated) data
     #[argh(option)]
     debug_filterted_csv: Option<PathBuf>,
+
+    /// explicitly specify column colours, like `column1=red,column2=FF00FF`
+    #[argh(option, short='c', default="Default::default()")]
+    colour_overrides: ColourOverrides,
+}
+
+#[derive(Default)]
+struct ColourOverrides(HashMap<String, Srgb<u8>>);
+
+impl std::str::FromStr for ColourOverrides {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut ret = HashMap::new();
+        for chunk in s.split(',') {
+            let Some((before_equals, after_equals)) = chunk.split_once('=') else {
+                anyhow::bail!("Each colour override chunk should contain `=`")
+            };
+            let colour = match palette::named::from_str(after_equals) {
+                Some(x) => x,
+                _ => match Srgb::from_str(after_equals) {
+                    Ok(x) => x,
+                    _ => anyhow::bail!("colour should be name like `red` or hex spec like `#fff` or `004455`")
+                }
+            };
+            ret.insert(before_equals.to_owned(), colour);
+        }
+        Ok(ColourOverrides(ret))
+    }
 }
 
 struct Series {
@@ -60,7 +89,7 @@ struct Series {
 
 /// x - datum from 0.0 to 1.0, pix_i - number of pixel in this cell, for gradient
 #[inline]
-fn get_colour(mut x: f64, mut hue: RgbHue, pix_i: u32, pix_n: u32) -> Rgb<u8> {
+fn get_colour(mut x: f64, (mut hue, saturation): (RgbHue, f32), pix_i: u32, pix_n: u32) -> Rgb<u8> {
     if !x.is_finite() {
         if pix_i % 2 == 0 {
             return Rgb::from([96, 96, 96]);
@@ -76,7 +105,7 @@ fn get_colour(mut x: f64, mut hue: RgbHue, pix_i: u32, pix_n: u32) -> Rgb<u8> {
     if pix_n > 1 {
         lightness += 0.1 - 0.2 * (pix_i as f64) / (pix_n - 1) as f64;
     }
-    let q = palette::Hsl::from_components((hue, 1.0, lightness as f32));
+    let q = palette::Hsl::from_components((hue, saturation, lightness as f32));
     let q = q.into_color();
     Rgb(palette::Srgb::from_linear(q).into_format().into_raw())
 }
@@ -278,17 +307,27 @@ fn main() -> anyhow::Result<()> {
         eprintln!("Finished writing debug csv");
     }
 
+    if opts.output_file.as_os_str() == "-" {
+        return Ok(());
+    }
+
     let mut hue_step = 360.0 / (dataset.len() as f32);
     if hue_step < 55.0 {
         hue_step = 55.0
     };
 
-    let main_hues: Vec<RgbHue> = dataset
+    let main_hues: Vec<(RgbHue, f32)> = dataset
         .iter()
         .enumerate()
-        .map(|(i, _)| {
-            let x = hue_step * (i as f32);
-            RgbHue::from_degrees(x)
+        .map(|(i, series)| {
+            if let Some(r#override) = opts.colour_overrides.0.get(&series.name) {
+                let r#override = r#override.into_format::<f32>();
+                let hsl : Hsl = r#override.into_color();
+                (hsl.hue, hsl.saturation)
+            } else {
+                let x = hue_step * (i as f32);
+                (RgbHue::from_degrees(x), 1.0)
+            }
         })
         .collect();
     let n = dataset.iter().map(|x| x.samples.len()).max().unwrap_or(0);
@@ -348,7 +387,7 @@ fn main() -> anyhow::Result<()> {
 /// Returns final cursor_y position
 fn legend(
     dataset: &Vec<Series>,
-    main_hues: &Vec<RgbHue>,
+    main_hues: &Vec<(RgbHue, f32)>,
     width: u32,
     mut img: Option<&mut ImageBuffer<Rgb<u8>, Vec<u8>>>,
     font: &rusttype::Font,
