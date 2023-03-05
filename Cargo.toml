@@ -2,6 +2,12 @@
 name = "csvcellplot"
 version = "0.1.0"
 edition = "2021"
+repository = "https://github.com/vi/csvcellplot"
+license = "MIT/Apache-2.0"
+description = "CSV to image converter, plotting multiple columns of numbers using blocks with varied lightness"
+categories = ["command-line-utilities"]
+keywords = ["csv", "png", "plot", "image", "plotting"]
+
 
 [dependencies]
 anyhow = "1.0.69"
