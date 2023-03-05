@@ -41,6 +41,7 @@ Download a pre-built executable from [Github releases](https://github.com/vi/csv
 ## CLI options
 
 <details><summary> csvcellplot --help output</summary>
+
 ```
 Usage: csvcellplot <output_file> [-W <image-width>] [-i <input-csv>] [-w <cell-width>] [-h <cell-height>] [-n] [-H] [--debug-filterted-csv <debug-filterted-csv>] [-c <colour-overrides>] [-S <default-saturation>] [-x <default-min-lightness>] [-X <default-max-lightness>] [-G <default-gradientness>] [-D <default-hue-drift>] [-R <max-cells-in-row>] [-g] [--legend-font <legend-font>] [--legend-font-scale <legend-font-scale>]
 
