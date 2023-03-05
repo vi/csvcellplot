@@ -223,10 +223,8 @@ fn main() -> anyhow::Result<()> {
         Some(x) => x,
         None => match opts.max_cells_in_row {
             None => 400,
-            Some(y) => {
-                (MARGIN_LEFT+MARGIN_RIGHT + opts.cell_width * y as u32).max(64)
-            }
-        }
+            Some(y) => (MARGIN_LEFT + MARGIN_RIGHT + opts.cell_width * y as u32).max(64),
+        },
     };
 
     if width < MARGIN_LEFT + MARGIN_RIGHT + LEDEND_SAMPLE_WIDTH {
@@ -236,7 +234,7 @@ fn main() -> anyhow::Result<()> {
     let block_width = opts.cell_width;
     let block_height = opts.cell_height;
 
-    let font = if let Some(fontpath) = opts.legend_font {
+    let font = if let Some(ref fontpath) = opts.legend_font {
         rusttype::Font::try_from_vec(std::fs::read(fontpath)?)
             .context("Invalid font file content")?
     } else {
@@ -245,190 +243,20 @@ fn main() -> anyhow::Result<()> {
 
     let mut dataset = Vec::<Series>::with_capacity(4);
 
-    {
-        let input: Box<dyn std::io::Read>;
-        if let Some(input_file_path) = opts.input_csv {
-            input = Box::new(std::fs::File::open(input_file_path)?);
-        } else {
-            input = Box::new(std::io::stdin());
-        }
-        //let input = std::io::BufReader::with_capacity(1024*256, input);
-
-        let mut csv = csv::Reader::from_reader(input);
-
-        for h in csv.headers()? {
-            dataset.push(Series {
-                samples: Vec::with_capacity(4096),
-                name: h.to_owned(),
-                hidden: false,
-            })
-        }
-
-        for r in csv.records() {
-            let r = r?;
-            for (i, s) in r.iter().enumerate() {
-                let x = s.parse().unwrap_or(f64::NAN);
-                dataset[i].samples.push(x);
-            }
-        }
-    }
+    load_dataset(&opts, &mut dataset)?;
 
     let n = dataset.iter().map(|x| x.samples.len()).max().unwrap_or(0);
 
     if !opts.no_fiter {
-        for serie in dataset.iter_mut() {
-            let mut sorted = Vec::with_capacity(serie.samples.len());
-            for x in &serie.samples {
-                if x.is_finite() && !opts.no_fiter {
-                    sorted.push(x);
-                }
-            }
-            let mut dummy = false;
-            let n = sorted.len();
-            if n < 2 {
-                dummy = true;
-            } else {
-                sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
-
-                let allowed_duplicates = 0; // (n / MAX_INTERP).max(1);
-                let mut duplicate = f64::NAN;
-                let mut duplicate_n = 0usize;
-                sorted.retain(|p| {
-                    if duplicate == **p {
-                        duplicate_n += 1;
-                        duplicate_n < allowed_duplicates
-                    } else {
-                        duplicate = **p;
-                        duplicate_n = 0;
-                        true
-                    }
-                });
-                let n = sorted.len();
-
-                if n < 2 {
-                    dummy = true;
-                } else {
-                    const MAX_INTERP: usize = 32;
-                    let interpolation_n = (n - 1).min(MAX_INTERP);
-                    #[derive(Debug)]
-                    struct InterpolationPoint {
-                        start_sample: f64,
-                        //stop_sample: f64,
-                        inv_stop_sample_minus_start_sample: f64,
-                        start_outrange: f64,
-                        stop_outrange: f64,
-                    }
-                    let mut interpolation_points = Vec::with_capacity(interpolation_n);
-                    let epsilon: f64 =
-                        (0.00000001f64).max((sorted[n - 1] - sorted[0]) / 1000_000.0);
-                    for i in 0..interpolation_n {
-                        let mut start_outrange = (i as f64) / (interpolation_n as f64);
-                        let mut stop_outrange = ((i + 1) as f64) / (interpolation_n as f64);
-                        let start_sample_index = i as f64 * (n - 1) as f64 / interpolation_n as f64;
-                        let stop_sample_index =
-                            (i + 1) as f64 * (n - 1) as f64 / interpolation_n as f64;
-
-                        let start_sample_index_i = (start_sample_index.floor() as usize).min(n - 1);
-                        let start_sample_index_j = (start_sample_index_i + 1).min(n - 1);
-                        let start_sample_index_t = start_sample_index.fract();
-                        let mut start_sample = sorted[start_sample_index_i]
-                            .lerp(*sorted[start_sample_index_j], start_sample_index_t);
-                        let stop_sample_index_i = (stop_sample_index.floor() as usize).min(n - 1);
-                        let stop_sample_index_j = (stop_sample_index_i + 1).min(n - 1);
-                        let stop_sample_index_t = stop_sample_index.fract();
-                        let mut stop_sample = sorted[stop_sample_index_i]
-                            .lerp(*sorted[stop_sample_index_j], stop_sample_index_t);
-
-                        if i == 0 {
-                            start_sample = *sorted[0];
-                        }
-                        if i == interpolation_n - 1 {
-                            stop_sample = *sorted[n - 1];
-                        }
-
-                        if stop_sample - start_sample < epsilon {
-                            start_outrange = 0.5 * start_outrange + 0.5 * stop_outrange;
-                            stop_outrange = start_outrange;
-                            stop_sample = start_sample + 1.0;
-                        }
-
-                        //dbg!(epsilon,start_sample_index,stop_sample_index,n,stop_sample_index_i,stop_sample_index_j,stop_sample,sorted[stop_sample_index_i],sorted[stop_sample_index_j]);
-                        let inv_stop_sample_minus_start_sample = 1.0 / (stop_sample - start_sample);
-
-                        interpolation_points.push(InterpolationPoint {
-                            start_outrange,
-                            start_sample,
-                            stop_outrange,
-                            inv_stop_sample_minus_start_sample,
-                        });
-                    }
-
-                    //dbg!(&interpolation_points);
-
-                    for x in &mut serie.samples {
-                        if x.is_finite() {
-                            let ret = interpolation_points
-                                .binary_search_by(|cand| cand.start_sample.partial_cmp(x).unwrap());
-                            let mut index = match ret {
-                                Ok(t) => t,
-                                Err(t) => t.saturating_sub(1),
-                            };
-                            if index >= interpolation_n {
-                                index = interpolation_n - 1;
-                            }
-
-                            let InterpolationPoint {
-                                start_outrange,
-                                start_sample,
-                                stop_outrange,
-                                inv_stop_sample_minus_start_sample,
-                            } = interpolation_points[index];
-
-                            let t = (*x - start_sample) * inv_stop_sample_minus_start_sample;
-                            let y = start_outrange.lerp(stop_outrange, t);
-                            //dbg!(*x, index, t, y);
-                            *x = y;
-                        }
-                    }
-                }
-            }
-            if dummy {
-                serie.hidden = true;
-                for x in &mut serie.samples {
-                    if x.is_finite() {
-                        *x = 0.5;
-                    }
-                }
-            }
-        }
+        interpolate(&mut dataset, &opts);
     }
 
     if !opts.no_hide {
         dataset.retain(|x| !x.hidden);
     }
 
-    if let Some(dbgout) = opts.debug_filterted_csv {
-        let mut csvout = csv::Writer::from_path(dbgout)?;
-        for serie in &dataset {
-            csvout.write_field(&serie.name)?;
-        }
-        csvout.write_record(None::<&[u8]>)?;
-
-        for i in 0..n {
-            for serie in &dataset {
-                match serie.samples.get(i) {
-                    Some(x) if x.is_finite() => {
-                        csvout.write_field(format!("{x}"))?;
-                    }
-                    _ => csvout.write_field("")?,
-                }
-            }
-            csvout.write_record(None::<&[u8]>)?;
-        }
-
-        csvout.flush()?;
-        drop(csvout);
-        eprintln!("Finished writing debug csv");
+    if let Some(ref dbgout) = opts.debug_filterted_csv {
+        write_interpolated_csv(dbgout, &dataset, n)?;
     }
 
     if opts.output_file.as_os_str() == "-" {
@@ -440,7 +268,7 @@ fn main() -> anyhow::Result<()> {
         hue_step = 55.0
     };
 
-    let main_hues: Vec<Style> = dataset
+    let styles: Vec<Style> = dataset
         .iter()
         .enumerate()
         .map(|(i, series)| {
@@ -470,7 +298,7 @@ fn main() -> anyhow::Result<()> {
     // simulate drawing legend to get its height
     let cursor_y = legend(
         &dataset,
-        &main_hues,
+        &styles,
         width,
         None,
         &font,
@@ -492,19 +320,50 @@ fn main() -> anyhow::Result<()> {
     img.fill(128);
 
     // Draw legend at the top
-    let mut cursor_y = legend(
+    let cursor_y = legend(
         &dataset,
-        &main_hues,
+        &styles,
         width,
         Some(&mut img),
         &font,
         opts.legend_font_scale,
     );
+
+    draw_cells(
+        n,
+        dataset,
+        styles,
+        block_height,
+        block_width,
+        cursor_y,
+        width,
+        image_height,
+        &mut img,
+        &opts,
+        band_height,
+    );
+
+    img.save(opts.output_file)?;
+    Ok(())
+}
+
+fn draw_cells(
+    n: usize,
+    dataset: Vec<Series>,
+    styles: Vec<Style>,
+    block_height: u32,
+    block_width: u32,
+    mut cursor_y: u32,
+    image_width: u32,
+    image_height: u32,
+    img: &mut ImageBuffer<Rgb<u8>, Vec<u8>>,
+    opts: &Opts,
+    band_height: u32,
+) {
     let mut cursor_x = MARGIN_LEFT;
     let mut cell_i_in_row = 0usize;
-
     for i in 0..n {
-        for ((j, series), style) in dataset.iter().enumerate().zip(main_hues.iter()) {
+        for ((j, series), style) in dataset.iter().enumerate().zip(styles.iter()) {
             let pix_n = block_height * block_height;
             let mut pix_i = 0;
             for v in 0..block_width {
@@ -517,7 +376,7 @@ fn main() -> anyhow::Result<()> {
                     );
                     let x = cursor_x + v;
                     let y = cursor_y + (j as u32) * block_height + u;
-                    if x < width && y < image_height {
+                    if x < image_width && y < image_height {
                         img.put_pixel(x, y, c);
                     }
                     pix_i += 1;
@@ -534,7 +393,7 @@ fn main() -> anyhow::Result<()> {
                 begin_new_row = true;
             }
         }
-        if cursor_x + block_width + MARGIN_RIGHT > width  {
+        if cursor_x + block_width + MARGIN_RIGHT > image_width {
             begin_new_row = true;
         }
         if begin_new_row {
@@ -543,9 +402,184 @@ fn main() -> anyhow::Result<()> {
             cursor_x = MARGIN_LEFT;
         }
     }
+}
 
-    img.save(opts.output_file)?;
+fn write_interpolated_csv(
+    dbgout: &PathBuf,
+    dataset: &Vec<Series>,
+    n: usize,
+) -> Result<(), anyhow::Error> {
+    let mut csvout = csv::Writer::from_path(dbgout)?;
+    for serie in dataset {
+        csvout.write_field(&serie.name)?;
+    }
+    csvout.write_record(None::<&[u8]>)?;
+    for i in 0..n {
+        for serie in dataset {
+            match serie.samples.get(i) {
+                Some(x) if x.is_finite() => {
+                    csvout.write_field(format!("{x}"))?;
+                }
+                _ => csvout.write_field("")?,
+            }
+        }
+        csvout.write_record(None::<&[u8]>)?;
+    }
+    csvout.flush()?;
+    drop(csvout);
+    eprintln!("Finished writing debug csv");
     Ok(())
+}
+
+fn interpolate(dataset: &mut Vec<Series>, opts: &Opts) {
+    for serie in dataset.iter_mut() {
+        let mut sorted = Vec::with_capacity(serie.samples.len());
+        for x in &serie.samples {
+            if x.is_finite() && !opts.no_fiter {
+                sorted.push(x);
+            }
+        }
+        let mut dummy = false;
+        let n = sorted.len();
+        if n < 2 {
+            dummy = true;
+        } else {
+            sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+
+            let allowed_duplicates = 0; // (n / MAX_INTERP).max(1);
+            let mut duplicate = f64::NAN;
+            let mut duplicate_n = 0usize;
+            sorted.retain(|p| {
+                if duplicate == **p {
+                    duplicate_n += 1;
+                    duplicate_n < allowed_duplicates
+                } else {
+                    duplicate = **p;
+                    duplicate_n = 0;
+                    true
+                }
+            });
+            let n = sorted.len();
+
+            if n < 2 {
+                dummy = true;
+            } else {
+                const MAX_INTERP: usize = 32;
+                let interpolation_n = (n - 1).min(MAX_INTERP);
+                #[derive(Debug)]
+                struct InterpolationPoint {
+                    start_sample: f64,
+                    //stop_sample: f64,
+                    inv_stop_sample_minus_start_sample: f64,
+                    start_outrange: f64,
+                    stop_outrange: f64,
+                }
+                let mut interpolation_points = Vec::with_capacity(interpolation_n);
+                let epsilon: f64 = (0.00000001f64).max((sorted[n - 1] - sorted[0]) / 1000_000.0);
+                for i in 0..interpolation_n {
+                    let mut start_outrange = (i as f64) / (interpolation_n as f64);
+                    let mut stop_outrange = ((i + 1) as f64) / (interpolation_n as f64);
+                    let start_sample_index = i as f64 * (n - 1) as f64 / interpolation_n as f64;
+                    let stop_sample_index =
+                        (i + 1) as f64 * (n - 1) as f64 / interpolation_n as f64;
+
+                    let start_sample_index_i = (start_sample_index.floor() as usize).min(n - 1);
+                    let start_sample_index_j = (start_sample_index_i + 1).min(n - 1);
+                    let start_sample_index_t = start_sample_index.fract();
+                    let mut start_sample = sorted[start_sample_index_i]
+                        .lerp(*sorted[start_sample_index_j], start_sample_index_t);
+                    let stop_sample_index_i = (stop_sample_index.floor() as usize).min(n - 1);
+                    let stop_sample_index_j = (stop_sample_index_i + 1).min(n - 1);
+                    let stop_sample_index_t = stop_sample_index.fract();
+                    let mut stop_sample = sorted[stop_sample_index_i]
+                        .lerp(*sorted[stop_sample_index_j], stop_sample_index_t);
+
+                    if i == 0 {
+                        start_sample = *sorted[0];
+                    }
+                    if i == interpolation_n - 1 {
+                        stop_sample = *sorted[n - 1];
+                    }
+
+                    if stop_sample - start_sample < epsilon {
+                        start_outrange = 0.5 * start_outrange + 0.5 * stop_outrange;
+                        stop_outrange = start_outrange;
+                        stop_sample = start_sample + 1.0;
+                    }
+
+                    //dbg!(epsilon,start_sample_index,stop_sample_index,n,stop_sample_index_i,stop_sample_index_j,stop_sample,sorted[stop_sample_index_i],sorted[stop_sample_index_j]);
+                    let inv_stop_sample_minus_start_sample = 1.0 / (stop_sample - start_sample);
+
+                    interpolation_points.push(InterpolationPoint {
+                        start_outrange,
+                        start_sample,
+                        stop_outrange,
+                        inv_stop_sample_minus_start_sample,
+                    });
+                }
+
+                //dbg!(&interpolation_points);
+
+                for x in &mut serie.samples {
+                    if x.is_finite() {
+                        let ret = interpolation_points
+                            .binary_search_by(|cand| cand.start_sample.partial_cmp(x).unwrap());
+                        let mut index = match ret {
+                            Ok(t) => t,
+                            Err(t) => t.saturating_sub(1),
+                        };
+                        if index >= interpolation_n {
+                            index = interpolation_n - 1;
+                        }
+
+                        let InterpolationPoint {
+                            start_outrange,
+                            start_sample,
+                            stop_outrange,
+                            inv_stop_sample_minus_start_sample,
+                        } = interpolation_points[index];
+
+                        let t = (*x - start_sample) * inv_stop_sample_minus_start_sample;
+                        let y = start_outrange.lerp(stop_outrange, t);
+                        //dbg!(*x, index, t, y);
+                        *x = y;
+                    }
+                }
+            }
+        }
+        if dummy {
+            serie.hidden = true;
+            for x in &mut serie.samples {
+                if x.is_finite() {
+                    *x = 0.5;
+                }
+            }
+        }
+    }
+}
+
+fn load_dataset(opts: &Opts, dataset: &mut Vec<Series>) -> Result<(), anyhow::Error> {
+    let input: Box<dyn std::io::Read>;
+    if let Some(input_file_path) = &opts.input_csv {
+        input = Box::new(std::fs::File::open(input_file_path)?);
+    } else {
+        input = Box::new(std::io::stdin());
+    }
+    let mut csv = csv::Reader::from_reader(input);
+    for h in csv.headers()? {
+        dataset.push(Series {
+            samples: Vec::with_capacity(4096),
+            name: h.to_owned(),
+            hidden: false,
+        })
+    }
+    Ok(for r in csv.records() {
+        let r = r?;
+        for (i, s) in r.iter().enumerate() {
+            let x = s.parse().unwrap_or(f64::NAN);
+            dataset[i].samples.push(x);
+        }
+    })
 }
 
 /// Returns final cursor_y position
