@@ -31,11 +31,11 @@ struct Opts {
     input_csv: Option<PathBuf>,
 
     /// width of a cell, in pixels
-    #[argh(option, short = 'w', default = "8")]
+    #[argh(option, short = 'w', default = "24")]
     cell_width: u32,
 
     /// height of a cell, in pixels
-    #[argh(option, short = 'h', default = "8")]
+    #[argh(option, short = 'h', default = "24")]
     cell_height: u32,
 
     /// do not run data though filter (interpolation), assume they are already from 0 to 1.
@@ -95,7 +95,7 @@ struct Opts {
 
     /// font scale to render legend text. Default is 14.
     /// Setting it to 0 prevents rendering legend.
-    #[argh(option, default = "14.0")]
+    #[argh(option, default = "24.0")]
     legend_font_scale: f32,
 }
 
@@ -222,7 +222,7 @@ fn main() -> anyhow::Result<()> {
     let width = match opts.image_width {
         Some(x) => x,
         None => match opts.max_cells_in_row {
-            None => 1920,
+            None => 400,
             Some(y) => {
                 (MARGIN_LEFT+MARGIN_RIGHT + opts.cell_width * y as u32).max(64)
             }
