@@ -83,11 +83,14 @@ Options:
                     maximum number of cell of one data series in a row
   -g, --grayscale   shotrcut for -x 0 -X 1 -S 0
   --legend-font     font file (ttf) to render legend text. Default is embedded
-                    found CallingCode
+                    font Dharma Type Sometype Mono
   --legend-font-scale
                     font scale to render legend text. Default is 14. Setting it
                     to 0 prevents rendering legend.
   --help            display usage information
-
 ```
 </details>
+
+## License
+
+Code is licensed with MIT or Apache-2.0. Embedded font file is licensed with IL Open Font License.

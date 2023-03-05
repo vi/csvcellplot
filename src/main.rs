@@ -8,7 +8,7 @@ use num_integer::div_ceil;
 use palette::{Hsl, IntoColor, Pixel, RgbHue, Srgb};
 use rusttype::Scale;
 
-static FONT: &[u8] = include_bytes!("../res/CallingCode-Regular.ttf");
+static FONT: &[u8] = include_bytes!("../res/SometypeMono-Regular.ttf");
 
 const LEDEND_SAMPLE_WIDTH: u32 = 20;
 const MARGIN_RIGHT: u32 = 5;
@@ -89,7 +89,7 @@ struct Opts {
     #[argh(switch, short = 'g')]
     grayscale: bool,
 
-    /// font file (ttf) to render legend text. Default is embedded found CallingCode
+    /// font file (ttf) to render legend text. Default is embedded font Dharma Type Sometype Mono
     #[argh(option)]
     legend_font: Option<PathBuf>,
 
