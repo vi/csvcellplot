@@ -1,12 +1,12 @@
 use std::{collections::HashMap, path::PathBuf};
 
+use anyhow::Context;
 use image::{ImageBuffer, Rgb};
-use imageproc::drawing::draw_text_mut;
+use imageproc::drawing::{draw_text_mut, text_size};
 use lerp::Lerp;
 use num_integer::div_ceil;
 use palette::{Hsl, IntoColor, Pixel, RgbHue, Srgb};
 use rusttype::Scale;
-use unicode_segmentation::UnicodeSegmentation;
 
 static FONT: &[u8] = include_bytes!("../res/CallingCode-Regular.ttf");
 
@@ -22,9 +22,9 @@ struct Opts {
     #[argh(positional)]
     output_file: PathBuf,
 
-    /// width of the image to write, default 1920
-    #[argh(option, short = 'W', default = "1920")]
-    image_width: u32,
+    /// width of the image to write, default 1920 or automatic if -R is present
+    #[argh(option, short = 'W')]
+    image_width: Option<u32>,
 
     /// input file to read CSV from, instead of stdin
     #[argh(option, short = 'i')]
@@ -64,7 +64,7 @@ struct Opts {
     /// use this saturation value for colours not specified explicitly. Defaults to 1.0.
     #[argh(option, short = 'S', default = "1.0")]
     default_saturation: f32,
-    
+
     /// defaults to 0.2
     #[argh(option, short = 'x', default = "0.2")]
     default_min_lightness: f32,
@@ -80,6 +80,23 @@ struct Opts {
     /// shift hue toghether with lightness. defaults to 0.0
     #[argh(option, short = 'D', default = "0.0")]
     default_hue_drift: f32,
+
+    /// maximum number of cell of one data series in a row
+    #[argh(option, short = 'R')]
+    max_cells_in_row: Option<usize>,
+
+    /// shotrcut for -x 0 -X 1 -S 0
+    #[argh(switch, short = 'g')]
+    grayscale: bool,
+
+    /// font file (ttf) to render legend text. Default is embedded found CallingCode
+    #[argh(option)]
+    legend_font: Option<PathBuf>,
+
+    /// font scale to render legend text. Default is 14.
+    /// Setting it to 0 prevents rendering legend.
+    #[argh(option, default = "14.0")]
+    legend_font_scale: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -109,20 +126,20 @@ impl std::str::FromStr for ColourOverrides {
             let mut min_lightness = 0.2;
             let mut max_lightness = 0.75;
             let mut gradientness = 0.0;
-            let mut hue_drift=0.0;
+            let mut hue_drift = 0.0;
             loop {
                 let Some(last_char) = after_equals.as_bytes().last() else { break };
                 match *last_char {
-                    b'+' => hue_steps+=1,
-                    b'-' => hue_steps-=1,
-                    b'/' => desaturates+=1,
-                    b'@' => hue_drift+=10.0,
-                    b'_' => min_lightness-=0.05,
-                    b'.' => min_lightness+=0.05,
-                    b'^' => max_lightness-=0.05,
-                    b'~' => max_lightness+=0.05,
-                    b'%' => gradientness-=0.05,
-                    b'&' => gradientness+=0.05,
+                    b'+' => hue_steps += 1,
+                    b'-' => hue_steps -= 1,
+                    b'/' => desaturates += 1,
+                    b'@' => hue_drift += 10.0,
+                    b'_' => min_lightness -= 0.05,
+                    b'.' => min_lightness += 0.05,
+                    b'^' => max_lightness -= 0.05,
+                    b'~' => max_lightness += 0.05,
+                    b'%' => gradientness -= 0.05,
+                    b'&' => gradientness += 0.05,
                     _ => break,
                 }
                 after_equals = &after_equals[0..(after_equals.len() - 1)];
@@ -194,13 +211,37 @@ fn get_colour(mut x: f64, style: &Style, pix_i: u32, pix_n: u32) -> Rgb<u8> {
 }
 
 fn main() -> anyhow::Result<()> {
-    let opts: Opts = argh::from_env();
+    let mut opts: Opts = argh::from_env();
 
-    let width = opts.image_width;
+    if opts.grayscale {
+        opts.default_min_lightness = 0.0;
+        opts.default_max_lightness = 1.0;
+        opts.default_saturation = 0.0;
+    }
+
+    let width = match opts.image_width {
+        Some(x) => x,
+        None => match opts.max_cells_in_row {
+            None => 1920,
+            Some(y) => {
+                (MARGIN_LEFT+MARGIN_RIGHT + opts.cell_width * y as u32).max(64)
+            }
+        }
+    };
+
+    if width < MARGIN_LEFT + MARGIN_RIGHT + LEDEND_SAMPLE_WIDTH {
+        anyhow::bail!("Image width too small")
+    }
+
     let block_width = opts.cell_width;
     let block_height = opts.cell_height;
 
-    let font = rusttype::Font::try_from_bytes(FONT).unwrap();
+    let font = if let Some(fontpath) = opts.legend_font {
+        rusttype::Font::try_from_vec(std::fs::read(fontpath)?)
+            .context("Invalid font file content")?
+    } else {
+        rusttype::Font::try_from_bytes(FONT).unwrap()
+    };
 
     let mut dataset = Vec::<Series>::with_capacity(4);
 
@@ -420,10 +461,21 @@ fn main() -> anyhow::Result<()> {
         .collect();
     let n = dataset.iter().map(|x| x.samples.len()).max().unwrap_or(0);
 
-    let rows = div_ceil(n as u32 * block_width, width - MARGIN_LEFT - MARGIN_RIGHT);
+    let mut rows = div_ceil(n as u32 * block_width, width - MARGIN_LEFT - MARGIN_RIGHT);
+    if let Some(maxrowlen) = opts.max_cells_in_row {
+        let rows2: u32 = div_ceil(n, maxrowlen).try_into()?;
+        rows = rows.max(rows2);
+    }
 
     // simulate drawing legend to get its height
-    let cursor_y = legend(&dataset, &main_hues, width, None, &font);
+    let cursor_y = legend(
+        &dataset,
+        &main_hues,
+        width,
+        None,
+        &font,
+        opts.legend_font_scale,
+    );
 
     let mut intraband_gap = 0u32;
 
@@ -440,8 +492,16 @@ fn main() -> anyhow::Result<()> {
     img.fill(128);
 
     // Draw legend at the top
-    let mut cursor_y = legend(&dataset, &main_hues, width, Some(&mut img), &font);
+    let mut cursor_y = legend(
+        &dataset,
+        &main_hues,
+        width,
+        Some(&mut img),
+        &font,
+        opts.legend_font_scale,
+    );
     let mut cursor_x = MARGIN_LEFT;
+    let mut cell_i_in_row = 0usize;
 
     for i in 0..n {
         for ((j, series), style) in dataset.iter().enumerate().zip(main_hues.iter()) {
@@ -455,14 +515,30 @@ fn main() -> anyhow::Result<()> {
                         pix_i,
                         pix_n,
                     );
-                    img.put_pixel(cursor_x + v, cursor_y + (j as u32) * block_height + u, c);
+                    let x = cursor_x + v;
+                    let y = cursor_y + (j as u32) * block_height + u;
+                    if x < width && y < image_height {
+                        img.put_pixel(x, y, c);
+                    }
                     pix_i += 1;
                 }
             }
         }
 
         cursor_x += block_width;
-        if cursor_x > width - MARGIN_RIGHT {
+        cell_i_in_row += 1;
+
+        let mut begin_new_row = false;
+        if let Some(maxrowlen) = opts.max_cells_in_row {
+            if cell_i_in_row >= maxrowlen {
+                begin_new_row = true;
+            }
+        }
+        if cursor_x + block_width + MARGIN_RIGHT > width  {
+            begin_new_row = true;
+        }
+        if begin_new_row {
+            cell_i_in_row = 0;
             cursor_y += band_height;
             cursor_x = MARGIN_LEFT;
         }
@@ -479,24 +555,38 @@ fn legend(
     width: u32,
     mut img: Option<&mut ImageBuffer<Rgb<u8>, Vec<u8>>>,
     font: &rusttype::Font,
+    font_scale: f32,
 ) -> u32 {
+    if font_scale < 0.1 {
+        return MARGIN_TOP;
+    }
     let mut cursor_x = MARGIN_LEFT;
     let mut cursor_y = MARGIN_TOP;
     let mut empty = true;
+    let mut current_legend_row_height = 20u32;
     for (series, style) in dataset.iter().zip(styles.iter()) {
-        // FIXME: unchecked arithmetic
         let fixed_width = MARGIN_RIGHT + LEDEND_SAMPLE_WIDTH + 2 + 12;
-        let text_width = series.name.graphemes(true).count() as u32 * 7;
+
+        //let text_width = series.name.graphemes(true).count() as u32 * 7;
+
+        let (text_width, text_height) = text_size(Scale::uniform(font_scale), &font, &series.name);
+        let (text_width, text_height) = (text_width as u32, text_height as u32);
+
         if cursor_x + fixed_width + text_width > width {
-            cursor_y += 20;
+            cursor_y += current_legend_row_height;
             cursor_x = MARGIN_LEFT;
+            current_legend_row_height = 20;
+        }
+
+        if current_legend_row_height < text_height + 3 {
+            current_legend_row_height = text_height + 3;
         }
 
         if let Some(img_) = img {
             for i in 0..LEDEND_SAMPLE_WIDTH {
                 let x = i as f64 / (LEDEND_SAMPLE_WIDTH - 1) as f64;
                 let c = get_colour(x, style, 0, 1);
-                for j in 0..14 {
+                for j in 0..text_height {
                     img_.put_pixel(cursor_x + i, cursor_y + j, c);
                 }
             }
@@ -507,12 +597,13 @@ fn legend(
             style.max_lightness = 1.0;
             let c = get_colour(0.75, &style, 0, 1);
 
+            //text_size();
             draw_text_mut(
                 img_,
                 c,
                 (cursor_x + LEDEND_SAMPLE_WIDTH + 2) as i32,
                 cursor_y as i32,
-                Scale::uniform(14.0),
+                Scale::uniform(font_scale),
                 &font,
                 &series.name,
             );
@@ -523,7 +614,7 @@ fn legend(
         empty = false;
     }
     if !empty {
-        cursor_y += 20;
+        cursor_y += current_legend_row_height;
     }
     cursor_y
 }
