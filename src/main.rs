@@ -97,11 +97,25 @@ struct Opts {
     /// Setting it to 0 prevents rendering legend.
     #[argh(option, default = "24.0")]
     legend_font_scale: f32,
+
+    /// use CIE L*C*h° instead of HSL, also automatically lower the `-S` unless explicitly specified
+    #[argh(switch, short='L')]
+    lch: bool,
+
+    /// maximum hue angle when auto-assigning hues.
+    /// Auto-assigned hues will loop around when this angle is surpassed
+    #[argh(option, default = "32.0")]
+    max_hue_angle: f32,
+
+    /// maximum number of ranked points to bring the values range to 0..1.
+    /// Use value 1 for linear interpolation, use high value for ranked
+    #[argh(option, default="32")]
+    max_interpolation_points: usize,
 }
 
 #[derive(Clone, Copy)]
 struct Style {
-    hue: RgbHue,
+    hue: RgbHue<f32>,
     saturation: f32,
     min_lightness: f32,
     max_lightness: f32,
@@ -156,16 +170,16 @@ impl std::str::FromStr for ColourOverrides {
 
             let colour = colour.into_format::<f32>();
             let hsl: Hsl = colour.into_color();
-            let mut hue = hsl.hue;
+            let mut hue = hsl.hue.to_degrees();
             let mut saturation = hsl.saturation;
 
-            hue += RgbHue::from_degrees(5.0 * hue_steps as f32);
+            hue += 5.0 * hue_steps as f32;
             for _ in 0..desaturates {
                 saturation *= 0.8;
             }
 
             let style = Style {
-                hue,
+                hue: RgbHue::from_degrees(hue),
                 saturation,
                 min_lightness,
                 max_lightness,
@@ -188,7 +202,7 @@ struct Series {
 
 /// x - datum from 0.0 to 1.0, pix_i - number of pixel in this cell, for gradient
 #[inline]
-fn get_colour(mut x: f64, style: &Style, pix_i: u32, pix_n: u32) -> Rgb<u8> {
+fn get_colour(mut x: f64, style: &Style, pix_i: u32, pix_n: u32, lch: bool) -> Rgb<u8> {
     if !x.is_finite() {
         if pix_i % 2 == 0 {
             return Rgb::from([96, 96, 96]);
@@ -199,15 +213,21 @@ fn get_colour(mut x: f64, style: &Style, pix_i: u32, pix_n: u32) -> Rgb<u8> {
     x = x.clamp(0.0, 1.0);
     let x = x as f32;
     let mut hue = style.hue;
-    hue += RgbHue::from_degrees(x * style.hue_drift);
+    hue += x * style.hue_drift;
     let mut lightness = style.min_lightness + x * (style.max_lightness - style.min_lightness);
     if pix_n > 1 {
         let gradient_pos = (pix_i as f32) / (pix_n - 1) as f32;
         lightness += style.gradientness * (2.0 * gradient_pos - 1.0);
     }
-    let q = palette::Hsl::from_components((hue, style.saturation, lightness));
-    let q = q.into_color();
-    Rgb(palette::Srgb::from_linear(q).into_format().into_raw())
+    if !lch {
+        let q = palette::Hsl::from_components((hue, style.saturation, lightness));
+        let q = q.into_color();
+        Rgb(palette::Srgb::from_linear(q).into_format().into_raw())
+    } else {
+        let q = palette::Lch::from_components((25.0+75.0*lightness, 100.0*style.saturation, hue.to_degrees() + 30.0));
+        let q = q.into_color();
+        Rgb(palette::Srgb::from_linear(q).into_format().into_raw())
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -264,8 +284,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut hue_step = 360.0 / (dataset.len() as f32);
-    if hue_step < 55.0 {
-        hue_step = 55.0
+    if hue_step < opts.max_hue_angle {
+        hue_step = opts.max_hue_angle
     };
 
     let styles: Vec<Style> = dataset
@@ -303,6 +323,7 @@ fn main() -> anyhow::Result<()> {
         None,
         &font,
         opts.legend_font_scale,
+        opts.lch,
     );
 
     let mut intraband_gap = 0u32;
@@ -327,6 +348,7 @@ fn main() -> anyhow::Result<()> {
         Some(&mut img),
         &font,
         opts.legend_font_scale,
+        opts.lch,
     );
 
     draw_cells(
@@ -373,6 +395,7 @@ fn draw_cells(
                         style,
                         pix_i,
                         pix_n,
+                        opts.lch,
                     );
                     let x = cursor_x + v;
                     let y = cursor_y + (j as u32) * block_height + u;
@@ -464,8 +487,7 @@ fn interpolate(dataset: &mut Vec<Series>, opts: &Opts) {
             if n < 2 {
                 dummy = true;
             } else {
-                const MAX_INTERP: usize = 32;
-                let interpolation_n = (n - 1).min(MAX_INTERP);
+                let interpolation_n = (n - 1).min(opts.max_interpolation_points);
                 #[derive(Debug)]
                 struct InterpolationPoint {
                     start_sample: f64,
@@ -590,6 +612,7 @@ fn legend(
     mut img: Option<&mut ImageBuffer<Rgb<u8>, Vec<u8>>>,
     font: &rusttype::Font,
     font_scale: f32,
+    lch: bool,
 ) -> u32 {
     if font_scale < 0.1 {
         return MARGIN_TOP;
@@ -619,7 +642,7 @@ fn legend(
         if let Some(img_) = img {
             for i in 0..LEDEND_SAMPLE_WIDTH {
                 let x = i as f64 / (LEDEND_SAMPLE_WIDTH - 1) as f64;
-                let c = get_colour(x, style, 0, 1);
+                let c = get_colour(x, style, 0, 1, lch);
                 for j in 0..text_height {
                     img_.put_pixel(cursor_x + i, cursor_y + j, c);
                 }
@@ -629,7 +652,7 @@ fn legend(
             style.gradientness = 0.0;
             style.min_lightness = 0.0;
             style.max_lightness = 1.0;
-            let c = get_colour(0.75, &style, 0, 1);
+            let c = get_colour(0.75, &style, 0, 1, lch);
 
             //text_size();
             draw_text_mut(

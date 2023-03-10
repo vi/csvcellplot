@@ -43,7 +43,7 @@ Download a pre-built executable from [Github releases](https://github.com/vi/csv
 <details><summary> csvcellplot --help output</summary>
 
 ```
-Usage: csvcellplot <output_file> [-W <image-width>] [-i <input-csv>] [-w <cell-width>] [-h <cell-height>] [-n] [-H] [--debug-filterted-csv <debug-filterted-csv>] [-c <colour-overrides>] [-S <default-saturation>] [-x <default-min-lightness>] [-X <default-max-lightness>] [-G <default-gradientness>] [-D <default-hue-drift>] [-R <max-cells-in-row>] [-g] [--legend-font <legend-font>] [--legend-font-scale <legend-font-scale>]
+Usage: csvcellplot <output_file> [-W <image-width>] [-i <input-csv>] [-w <cell-width>] [-h <cell-height>] [-n] [-H] [--debug-filterted-csv <debug-filterted-csv>] [-c <colour-overrides>] [-S <default-saturation>] [-x <default-min-lightness>] [-X <default-max-lightness>] [-G <default-gradientness>] [-D <default-hue-drift>] [-R <max-cells-in-row>] [-g] [--legend-font <legend-font>] [--legend-font-scale <legend-font-scale>] [-L] [--max-hue-angle <max-hue-angle>] [--max-interpolation-points <max-interpolation-points>]
 
 read csv data from stdin and write png to file
 
@@ -88,7 +88,16 @@ Options:
   --legend-font-scale
                     font scale to render legend text. Default is 14. Setting it
                     to 0 prevents rendering legend.
+  -L, --lch         use CIE L*C*h° instead of HSL, also automatically lower the
+                    `-S` unless explicitly specified
+  --max-hue-angle   maximum hue angle when auto-assigning hues. Auto-assigned
+                    hues will loop around when this angle is surpassed
+  --max-interpolation-points
+                    maximum number of ranked points to bring the values range to
+                    0..1. Use value 1 for linear interpolation, use high value
+                    for ranked
   --help            display usage information
+
 ```
 </details>
 
