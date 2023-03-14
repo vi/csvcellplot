@@ -43,7 +43,7 @@ Download a pre-built executable from [Github releases](https://github.com/vi/csv
 <details><summary> csvcellplot --help output</summary>
 
 ```
-Usage: csvcellplot <output_file> [-W <image-width>] [-i <input-csv>] [-w <cell-width>] [-h <cell-height>] [-n] [-H] [--debug-filterted-csv <debug-filterted-csv>] [-c <colour-overrides>] [-S <default-saturation>] [-x <default-min-lightness>] [-X <default-max-lightness>] [-G <default-gradientness>] [-D <default-hue-drift>] [-R <max-cells-in-row>] [-g] [--legend-font <legend-font>] [--legend-font-scale <legend-font-scale>] [-L] [--max-hue-angle <max-hue-angle>] [--max-interpolation-points <max-interpolation-points>]
+Usage: csvcellplot <output_file> [-W <image-width>] [-i <input-csv>] [-w <cell-width>] [-h <cell-height>] [-n] [-H] [--debug-filterted-csv <debug-filterted-csv>] [-c <colour-overrides>] [-S <default-saturation>] [-x <default-min-lightness>] [-X <default-max-lightness>] [-G <default-gradientness>] [-D <default-hue-drift>] [-R <max-cells-in-row>] [-g] [--legend-font <legend-font>] [--legend-font-scale <legend-font-scale>] [-L] [--max-hue-angle <max-hue-angle>] [--max-interpolation-points <max-interpolation-points>] [-p <partition>]
 
 read csv data from stdin and write png to file
 
@@ -96,6 +96,8 @@ Options:
                     maximum number of ranked points to bring the values range to
                     0..1. Use value 1 for linear interpolation, use high value
                     for ranked
+  -p, --partition   partition data by values of this column and produce multiple
+                    output images. Normalisation is still performned together.
   --help            display usage information
 
 ```

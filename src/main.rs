@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::{PathBuf, Path}};
 
 use anyhow::Context;
 use image::{ImageBuffer, Rgb};
@@ -7,6 +7,7 @@ use lerp::Lerp;
 use num_integer::div_ceil;
 use palette::{Hsl, IntoColor, Pixel, RgbHue, Srgb};
 use rusttype::Scale;
+use slab::Slab;
 
 static FONT: &[u8] = include_bytes!("../res/SometypeMono-Regular.ttf");
 
@@ -99,7 +100,7 @@ struct Opts {
     legend_font_scale: f32,
 
     /// use CIE L*C*h° instead of HSL, also automatically lower the `-S` unless explicitly specified
-    #[argh(switch, short='L')]
+    #[argh(switch, short = 'L')]
     lch: bool,
 
     /// maximum hue angle when auto-assigning hues.
@@ -109,8 +110,13 @@ struct Opts {
 
     /// maximum number of ranked points to bring the values range to 0..1.
     /// Use value 1 for linear interpolation, use high value for ranked
-    #[argh(option, default="32")]
+    #[argh(option, default = "32")]
     max_interpolation_points: usize,
+
+    /// partition data by values of this column and produce multiple output images.
+    /// Normalisation is still performned together.
+    #[argh(option, short='p')]
+    partition: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -200,6 +206,13 @@ struct Series {
     hidden: bool,
 }
 
+#[derive(Default)]
+struct Partitions {
+    name2idx: HashMap<String, usize>,
+    idx2name: Slab<String>,
+    samples: Vec<usize>,
+}
+
 /// x - datum from 0.0 to 1.0, pix_i - number of pixel in this cell, for gradient
 #[inline]
 fn get_colour(mut x: f64, style: &Style, pix_i: u32, pix_n: u32, lch: bool) -> Rgb<u8> {
@@ -224,7 +237,11 @@ fn get_colour(mut x: f64, style: &Style, pix_i: u32, pix_n: u32, lch: bool) -> R
         let q = q.into_color();
         Rgb(palette::Srgb::from_linear(q).into_format().into_raw())
     } else {
-        let q = palette::Lch::from_components((25.0+75.0*lightness, 100.0*style.saturation, hue.to_degrees() + 30.0));
+        let q = palette::Lch::from_components((
+            25.0 + 75.0 * lightness,
+            100.0 * style.saturation,
+            hue.to_degrees() + 30.0,
+        ));
         let q = q.into_color();
         Rgb(palette::Srgb::from_linear(q).into_format().into_raw())
     }
@@ -262,8 +279,9 @@ fn main() -> anyhow::Result<()> {
     };
 
     let mut dataset = Vec::<Series>::with_capacity(4);
+    let mut partitions = Partitions::default();
 
-    load_dataset(&opts, &mut dataset)?;
+    load_dataset(&opts, &mut dataset, &mut partitions)?;
 
     let n = dataset.iter().map(|x| x.samples.len()).max().unwrap_or(0);
 
@@ -276,7 +294,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Some(ref dbgout) = opts.debug_filterted_csv {
-        write_interpolated_csv(dbgout, &dataset, n)?;
+        write_interpolated_csv(dbgout, &dataset, n, &partitions)?;
     }
 
     if opts.output_file.as_os_str() == "-" {
@@ -307,15 +325,72 @@ fn main() -> anyhow::Result<()> {
             }
         })
         .collect();
-    let n = dataset.iter().map(|x| x.samples.len()).max().unwrap_or(0);
 
+    if opts.partition.is_none() {
+        prepare_and_write_pic(
+            block_width,
+            width,
+            &opts,
+            dataset,
+            &styles,
+            &font,
+            block_height,
+            &opts.output_file,
+            None,
+        )?;
+    } else {
+        for (part_index, part_name) in partitions.idx2name.iter() {
+            let filtered_dataset = Vec::from_iter(dataset.iter().map(|s|{
+                Series {
+                    hidden: s.hidden,
+                    name: s.name.to_owned(),
+                    samples: Vec::from_iter(s.samples.iter().enumerate().flat_map(|(index, value)|{
+                        if partitions.samples.get(index) == Some(&part_index) {
+                            Some(*value)
+                        } else {
+                            None
+                        }
+                    })),
+                }
+            }));
+            let mut outfile = opts.output_file.clone();
+            if ! outfile.set_extension(format!("{:04}.png", part_index)) {
+                anyhow::bail!("Failed to set filename suffic for partitioned pictures");
+            }
+
+            prepare_and_write_pic(
+                block_width,
+                width,
+                &opts,
+                filtered_dataset,
+                &styles,
+                &font,
+                block_height,
+                &outfile,
+                Some(part_name),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn prepare_and_write_pic(
+    block_width: u32,
+    width: u32,
+    opts: &Opts,
+    dataset: Vec<Series>,
+    styles: &Vec<Style>,
+    font: &rusttype::Font,
+    block_height: u32,
+    output_file: &Path,
+    partition_name: Option<&str>,
+) -> Result<(), anyhow::Error> {
+    let n = dataset.iter().map(|x| x.samples.len()).max().unwrap_or(0);
     let mut rows = div_ceil(n as u32 * block_width, width - MARGIN_LEFT - MARGIN_RIGHT);
     if let Some(maxrowlen) = opts.max_cells_in_row {
         let rows2: u32 = div_ceil(n, maxrowlen).try_into()?;
         rows = rows.max(rows2);
     }
-
-    // simulate drawing legend to get its height
     let cursor_y = legend(
         &dataset,
         &styles,
@@ -324,23 +399,17 @@ fn main() -> anyhow::Result<()> {
         &font,
         opts.legend_font_scale,
         opts.lch,
+        partition_name,
     );
-
     let mut intraband_gap = 0u32;
-
     if dataset.len() > 1 {
         intraband_gap = (dataset.len() as u32 + 3) / 4;
         intraband_gap *= block_height;
     }
-
     let band_height = (dataset.len() as u32) * block_height + intraband_gap;
     let image_height = cursor_y + band_height * rows;
-
     let mut img = ImageBuffer::<Rgb<u8>, _>::new(width, image_height);
-
     img.fill(128);
-
-    // Draw legend at the top
     let cursor_y = legend(
         &dataset,
         &styles,
@@ -349,8 +418,8 @@ fn main() -> anyhow::Result<()> {
         &font,
         opts.legend_font_scale,
         opts.lch,
+        partition_name,
     );
-
     draw_cells(
         n,
         dataset,
@@ -364,15 +433,14 @@ fn main() -> anyhow::Result<()> {
         &opts,
         band_height,
     );
-
-    img.save(opts.output_file)?;
+    img.save(output_file)?;
     Ok(())
 }
 
 fn draw_cells(
     n: usize,
     dataset: Vec<Series>,
-    styles: Vec<Style>,
+    styles: &Vec<Style>,
     block_height: u32,
     block_width: u32,
     mut cursor_y: u32,
@@ -431,13 +499,27 @@ fn write_interpolated_csv(
     dbgout: &PathBuf,
     dataset: &Vec<Series>,
     n: usize,
+    partitions: &Partitions,
 ) -> Result<(), anyhow::Error> {
     let mut csvout = csv::Writer::from_path(dbgout)?;
+    if !partitions.idx2name.is_empty() {
+        csvout.write_field("partition")?;
+    }
     for serie in dataset {
         csvout.write_field(&serie.name)?;
     }
     csvout.write_record(None::<&[u8]>)?;
     for i in 0..n {
+        if !partitions.idx2name.is_empty() {
+            match partitions
+                .samples
+                .get(i)
+                .map(|q| partitions.idx2name.get(*q))
+            {
+                Some(Some(s)) => csvout.write_field(s)?,
+                _ => csvout.write_field("???")?,
+            }
+        }
         for serie in dataset {
             match serie.samples.get(i) {
                 Some(x) if x.is_finite() => {
@@ -580,7 +662,11 @@ fn interpolate(dataset: &mut Vec<Series>, opts: &Opts) {
     }
 }
 
-fn load_dataset(opts: &Opts, dataset: &mut Vec<Series>) -> Result<(), anyhow::Error> {
+fn load_dataset(
+    opts: &Opts,
+    dataset: &mut Vec<Series>,
+    partitions: &mut Partitions,
+) -> Result<(), anyhow::Error> {
     let input: Box<dyn std::io::Read>;
     if let Some(input_file_path) = &opts.input_csv {
         input = Box::new(std::fs::File::open(input_file_path)?);
@@ -588,18 +674,44 @@ fn load_dataset(opts: &Opts, dataset: &mut Vec<Series>) -> Result<(), anyhow::Er
         input = Box::new(std::io::stdin());
     }
     let mut csv = csv::Reader::from_reader(input);
-    for h in csv.headers()? {
+    let mut partition_column_index = None;
+    for (i, h) in csv.headers()?.into_iter().enumerate() {
+        if let Some(ref partcol) = opts.partition {
+            if h == partcol {
+                if partition_column_index.is_some() {
+                    anyhow::bail!("Multiple partition columns found");
+                }
+                partition_column_index = Some(i);
+                continue;
+            }
+        }
         dataset.push(Series {
             samples: Vec::with_capacity(4096),
             name: h.to_owned(),
             hidden: false,
         })
     }
+    if opts.partition.is_some() && partition_column_index.is_none() {
+        anyhow::bail!("partition column not found");
+    }
     Ok(for r in csv.records() {
         let r = r?;
+        let mut dataseries_index = 0;
         for (i, s) in r.iter().enumerate() {
+            if Some(i) == partition_column_index {
+                let partition_index = if let Some(q) = partitions.name2idx.get(s) {
+                    *q
+                } else {
+                    let newidx = partitions.idx2name.insert(s.to_owned());
+                    partitions.name2idx.insert(s.to_owned(), newidx);
+                    newidx
+                };
+                partitions.samples.push(partition_index);
+                continue;
+            }
             let x = s.parse().unwrap_or(f64::NAN);
-            dataset[i].samples.push(x);
+            dataset[dataseries_index].samples.push(x);
+            dataseries_index+=1;
         }
     })
 }
@@ -613,6 +725,7 @@ fn legend(
     font: &rusttype::Font,
     font_scale: f32,
     lch: bool,
+    partition_name: Option<&str>,
 ) -> u32 {
     if font_scale < 0.1 {
         return MARGIN_TOP;
@@ -621,6 +734,25 @@ fn legend(
     let mut cursor_y = MARGIN_TOP;
     let mut empty = true;
     let mut current_legend_row_height = 20u32;
+    if let Some(partname) = partition_name {
+        let (_tw, text_height) = text_size(Scale::uniform(font_scale), &font, partname);
+
+        if let Some(img_) = img {
+            draw_text_mut(
+                img_,
+                [255,255,255].into(),
+                cursor_x as i32,
+                cursor_y as i32,
+                Scale::uniform(font_scale),
+                &font,
+                partname,
+            );
+            img = Some(img_);
+        }
+
+        cursor_y += 4;
+        cursor_y += text_height as u32;
+    }
     for (series, style) in dataset.iter().zip(styles.iter()) {
         let fixed_width = MARGIN_RIGHT + LEDEND_SAMPLE_WIDTH + 2 + 12;
 
@@ -654,7 +786,6 @@ fn legend(
             style.max_lightness = 1.0;
             let c = get_colour(0.75, &style, 0, 1, lch);
 
-            //text_size();
             draw_text_mut(
                 img_,
                 c,
