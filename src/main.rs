@@ -117,6 +117,18 @@ struct Opts {
     /// Normalisation is still performned together.
     #[argh(option, short='p')]
     partition: Option<String>,
+
+    /// defaults to 128
+    #[argh(option, default = "128")]
+    background_lightness: u8,
+
+    /// defaults to 64
+    #[argh(option, default = "64")]
+    null_strips_lightness1: u8,
+
+    /// defaults to 96
+    #[argh(option, default = "96")]
+    null_strips_lightness2: u8,
 }
 
 #[derive(Clone, Copy)]
@@ -127,6 +139,8 @@ struct Style {
     max_lightness: f32,
     gradientness: f32,
     hue_drift: f32,
+    null_strip1: Rgb<u8>,
+    null_strip2: Rgb<u8>,
 }
 
 #[derive(Default)]
@@ -191,6 +205,8 @@ impl std::str::FromStr for ColourOverrides {
                 max_lightness,
                 gradientness,
                 hue_drift,
+                null_strip1:  Rgb::from([128,128,128]),
+                null_strip2: Rgb::from([64, 64, 64]),
             };
 
             ret.insert(before_equals.to_owned(), style);
@@ -218,9 +234,9 @@ struct Partitions {
 fn get_colour(mut x: f64, style: &Style, pix_i: u32, pix_n: u32, lch: bool) -> Rgb<u8> {
     if !x.is_finite() {
         if pix_i % 2 == 0 {
-            return Rgb::from([96, 96, 96]);
+            return style.null_strip1;
         } else {
-            return Rgb::from([140, 140, 140]);
+            return style.null_strip2;
         }
     }
     x = x.clamp(0.0, 1.0);
@@ -306,7 +322,7 @@ fn main() -> anyhow::Result<()> {
         hue_step = opts.max_hue_angle
     };
 
-    let styles: Vec<Style> = dataset
+    let mut styles: Vec<Style> = dataset
         .iter()
         .enumerate()
         .map(|(i, series)| {
@@ -321,10 +337,17 @@ fn main() -> anyhow::Result<()> {
                     max_lightness: opts.default_max_lightness,
                     gradientness: opts.default_gradientness,
                     hue_drift: opts.default_hue_drift,
+                    null_strip1:  Rgb::from([128,128,128]),
+                    null_strip2: Rgb::from([64, 64, 64]),
                 }
             }
         })
         .collect();
+
+    for style in &mut styles {
+        style.null_strip1 = Rgb::from([opts.null_strips_lightness1,opts.null_strips_lightness1,opts.null_strips_lightness1]);
+        style.null_strip2 = Rgb::from([opts.null_strips_lightness2,opts.null_strips_lightness2,opts.null_strips_lightness2]);
+    }
 
     if opts.partition.is_none() {
         prepare_and_write_pic(
@@ -337,6 +360,7 @@ fn main() -> anyhow::Result<()> {
             block_height,
             &opts.output_file,
             None,
+            opts.background_lightness,
         )?;
     } else {
         for (part_index, part_name) in partitions.idx2name.iter() {
@@ -368,6 +392,7 @@ fn main() -> anyhow::Result<()> {
                 block_height,
                 &outfile,
                 Some(part_name),
+                opts.background_lightness,
             )?;
         }
     }
@@ -384,6 +409,7 @@ fn prepare_and_write_pic(
     block_height: u32,
     output_file: &Path,
     partition_name: Option<&str>,
+    background_lightness: u8,
 ) -> Result<(), anyhow::Error> {
     let n = dataset.iter().map(|x| x.samples.len()).max().unwrap_or(0);
     let mut rows = div_ceil(n as u32 * block_width, width - MARGIN_LEFT - MARGIN_RIGHT);
@@ -409,7 +435,7 @@ fn prepare_and_write_pic(
     let band_height = (dataset.len() as u32) * block_height + intraband_gap;
     let image_height = cursor_y + band_height * rows;
     let mut img = ImageBuffer::<Rgb<u8>, _>::new(width, image_height);
-    img.fill(128);
+    img.fill(background_lightness);
     let cursor_y = legend(
         &dataset,
         &styles,
